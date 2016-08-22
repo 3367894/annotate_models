@@ -507,16 +507,42 @@ module AnnotateModels
     def get_loaded_model(model_path)
       begin
         ActiveSupport::Inflector.constantize(ActiveSupport::Inflector.camelize(model_path))
-      rescue
+      rescue LoadError => e
         # Revert to the old way but it is not really robust
-        ObjectSpace.each_object(::Class).
+        klass = ObjectSpace.each_object(::Class).
           select do |c|
             Class === c and    # note: we use === to avoid a bug in activesupport 2.3.14 OptionMerger vs. is_a?
             c.ancestors.respond_to?(:include?) and  # to fix FactoryGirl bug, see https://github.com/ctran/annotate_models/pull/82
             c.ancestors.include?(ActiveRecord::Base)
           end.
-          detect { |c| ActiveSupport::Inflector.underscore(c.to_s) == model_path }
+          detect do |c|
+          ActiveSupport::Inflector.underscore(c.to_s) == model_path || in_file?(c, model_path)
+        end
+        raise e unless klass
+        klass
       end
+    end
+
+    def in_file?(klass, file_path)
+      methods = defined_methods(klass)
+      file_groups = methods.group_by{|sl| sl[0]}
+      file_counts = file_groups.map do |file, sls|
+        lines = sls.map{|sl| sl[1]}
+        count = lines.size
+        line = lines.min
+        {file: file, count: count, line: line}
+      end
+      file_counts.sort_by!{|fc| fc[:count]}
+      source_locations = file_counts.map{|fc| fc[:file] }
+      source_locations.select{ |sl| sl.include?(file_path) }.size > 0
+    end
+
+    def defined_methods(klass)
+      methods = klass.methods(false).map { |m| klass.method(m) } +
+        klass.instance_methods(false).map { |m| klass.instance_method(m) }
+      methods.map!(&:source_location)
+      methods.compact!
+      methods
     end
 
     # We're passed a name of things that might be
